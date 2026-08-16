@@ -13,7 +13,8 @@ useful to tune available as environment variables.
 
 - NVIDIA DGX Spark, or another GB10 system with `sm_121a` support
 - Docker with NVIDIA Container Toolkit configured
-- one of the supported Qwen3.8-27B checkpoints downloaded locally
+- the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/guides/cli),
+  or `uvx` as a fallback
 
 The default model directory is `$HOME/models/qwen3.8-27b`:
 
@@ -24,8 +25,10 @@ qwen3.8-27b/
 └── nvfp4/
 ```
 
-Only the directory for the profile you run is required. Each directory should
-be a complete Hugging Face checkpoint and contain `config.json`.
+Only the directory for the profile you run is required. If it is missing, the
+launcher downloads the selected checkpoint at the pinned revision before
+starting vLLM. Hugging Face's local-directory metadata makes interrupted and
+repeated downloads resumable. Existing checkpoints are left alone.
 
 ## Running it
 
@@ -125,11 +128,13 @@ Pinned checkpoint revisions used for the comparison:
 | `QWEN38_KV_CACHE_DTYPE` | `auto` | KV cache data type |
 | `QWEN38_MTP_TOKENS` | `3` | native MTP draft width |
 | `QWEN38_CUDAGRAPHS` | `1` | set to `0` to disable CUDA graphs |
+| `QWEN38_AUTO_DOWNLOAD` | `1` | set to `0` to require preloaded weights |
 
 The image can be changed with `QWEN38_IMAGE`, but the pinned digest is the only
 one tested here. The launcher uses host networking and binds vLLM to
 `127.0.0.1`; put an authenticated proxy in front of it if remote access is
-needed.
+needed. The public checkpoints do not require authentication; if that changes,
+the downloader honors the Hugging Face CLI's saved login or `HF_TOKEN`.
 
 ## Notes
 
