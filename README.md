@@ -29,11 +29,21 @@ be a complete Hugging Face checkpoint and contain `config.json`.
 
 ## Running it
 
-The production profile is NVFP4 with three MTP draft tokens:
+The recommended production command is:
 
 ```bash
+QWEN38_KV_CACHE_DTYPE=float8_e4m3fn \
+QWEN38_CONTEXT=131072 \
+QWEN38_GPU_MEMORY_UTILIZATION=0.70 \
+QWEN38_MAX_SEQS=8 \
+QWEN38_MAX_BATCHED_TOKENS=16384 \
+QWEN38_MTP_TOKENS=3 \
 runtime/run-vllm.sh nvfp4 mtp
 ```
+
+This selects the NVFP4 checkpoint, native MTP at width 3, the calibrated FP8
+KV cache, CUDA graphs, prefix caching, chunked prefill, and the scheduler limits
+used for the promoted benchmark profile.
 
 The endpoint is available at `http://127.0.0.1:18083/v1`. For example:
 
@@ -63,9 +73,17 @@ The promoted profile has:
 - Qwen3 reasoning and Qwen3 Coder tool-call parsers
 - at most eight concurrent sequences
 
-Explicit API sampling values are left to the client. Qwen's published defaults
-are temperature 1.0, top-p 0.95, and top-k 20 for thinking, or temperature 0.7,
-top-p 0.8, top-k 20, and presence penalty 1.5 with thinking disabled.
+Explicit API sampling values are left to the client. Qwen recommends these
+presets in the [official Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices):
+
+| Mode | Thinking | Temperature | Top-p | Top-k | Min-p | Presence penalty | Repetition penalty |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Thinking | enabled | `1.0` | `0.95` | `20` | `0.0` | `0.0` | `1.0` |
+| Instruct | disabled | `0.7` | `0.8` | `20` | `0.0` | `1.5` | `1.0` |
+
+For vLLM, set `chat_template_kwargs.enable_thinking` to `true` or `false` in
+the request body. The launcher sets `preserve_thinking` to `false`, so prior
+reasoning is not carried into later turns.
 
 ## Speed on DGX Spark
 
