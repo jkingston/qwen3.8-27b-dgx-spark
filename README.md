@@ -1,14 +1,17 @@
 # Qwen3.8-27B on DGX Spark
 
-This repository contains the small runtime I use to serve Qwen3.8-27B on a
-single NVIDIA DGX Spark. The recommended profile uses RadixArk's NVFP4 target,
-its native DSpark drafter, and SGLang. It exposes an OpenAI-compatible API on
-localhost. The previous Unsloth NVFP4 + vLLM MTP launcher remains available as
-a fallback and comparison profile.
+This repository serves Qwen3.8-27B on one NVIDIA DGX Spark. The validated
+production profile uses RadixArk's NVFP4 target, its native DSpark drafter and
+SGLang. A newer, substantially more ambitious DenseSpark 1.3 profile is now
+included as an opt-in candidate. It combines a symmetric AutoRound GPTQ INT4
+checkpoint, native MTP, an INT8 output head, product-quantized draft-head
+search, SM121 Humming kernels, three-way linear dispatch and FlashInfer GDN
+prefill on vLLM 0.27.1.
 
-The launcher is deliberately narrow in scope. It pins the container image,
-keeps model weights outside the repository, and makes the settings that are
-useful to tune available as environment variables.
+The SGLang launcher pins its container image and checkpoints. DenseSpark is
+vendored at upstream release 1.3, commit
+`9ae122f757bbae28c875d00c8b186c4837187434`, so this repository remains a
+complete checkout rather than requiring a Git submodule.
 
 ## Requirements
 
@@ -59,11 +62,40 @@ curl http://127.0.0.1:18083/v1/chat/completions \
 
 Use `runtime/stop-sglang.sh` to stop the container cleanly.
 
+### DenseSpark candidate
+
+Build it once (about 18 GiB of model weights plus the container image):
+
+```bash
+runtime/densespark/install.sh --fast --concurrency 16 --no-launch
+```
+
+Then select a workload rather than hand-tuning the draft depth:
+
+```bash
+# 16-request, 64K multi-agent profile; native MTP depth 3
+runtime/run-densespark.sh agents
+
+# 131K latency profile; native MTP depth 8
+runtime/run-densespark.sh interactive
+```
+
+Both expose model `qwen3.8-27b` at `http://127.0.0.1:18083/v1`. Stop either
+with `runtime/stop-densespark.sh`. The profile name describes the concurrency
+used to choose MTP depth; vLLM admission is capped at 16 only in the agent
+profile.
+
+DenseSpark currently defaults to a BF16 KV cache and disables prefix caching.
+At 131K, the measured cache held 710,106 tokens, or 5.42 completely full
+contexts. Choose SGLang when repeated long prefixes or validated full-context
+capacity matter more than peak decode throughput.
+
 ## Runtime profiles
 
-`runtime/run-sglang.sh` is the promoted profile. `runtime/run-vllm.sh` remains
-available for the BF16, FP8, and Unsloth NVFP4 checkpoints; its second argument
-is `none` or `mtp`.
+`runtime/run-sglang.sh` remains the promoted profile. `runtime/run-densespark.sh`
+is the faster experimental path. `runtime/run-vllm.sh` remains available for
+the BF16, FP8, and Unsloth NVFP4 checkpoints; its second argument is `none` or
+`mtp`.
 
 The promoted profile has:
 
@@ -106,11 +138,29 @@ checkpoint; Qwen does not publish this checkpoint as FP16.
 | Unsloth NVFP4 | MTP, width 2 | 23.91 tok/s | 21.44 tok/s | 1,248 tok/s |
 | Unsloth NVFP4 | MTP, width 3 | 26.84 tok/s | 22.98 tok/s | — |
 | RadixArk NVFP4 | SGLang DSpark, block 7 | 39.60 tok/s | 30.16 tok/s | — |
+| AutoRound GPTQ INT4 | DenseSpark, C16/MTP3 | 38.76 tok/s | — | — |
 
-The first five rows use vLLM. The final promoted row uses SGLang and achieved
+The first five rows use the older vLLM profiles. The RadixArk row is the
+promoted SGLang profile and achieved
 163.30 aggregate tok/s at concurrency 8. On a 55,670-token repository prompt,
 prefix reuse reduced TTFT from 41.93 seconds to 0.37 seconds and the repeated
 request completed in 7.25 seconds. A Qwen Coder tool-call smoke test passed.
+
+The DenseSpark row is the median of two warm 1,000-input/1,000-output runs on
+the profile tuned for concurrency 16, not its faster concurrency-1/MTP8
+profile. Its first concurrency-8 shape did not complete during local
+qualification, so DenseSpark has not replaced SGLang. See the
+[evaluation record](results/2026-09-03-densespark-evaluation.md) for cold-start,
+memory and failure details.
+
+Upstream DenseSpark reports 44.9 tok/s mean decode and 49.1 token-weighted
+single-request throughput, plus 260.2 aggregate tok/s for its balanced
+16-request test. Those are promising targets, not results reproduced by this
+repository. The other active optimization line is
+[DFlash2 on SGLang](https://github.com/Weschera/Qwen3.8-27B-NVFP4-DFlash2-DGX-Spark),
+which retains the Radix/SGLang architecture and reports 114.5 aggregate tok/s
+at concurrency 8. It currently depends on a patched image and its auto-tuned
+single-stream result has a documented fast/slow boot lottery.
 
 Pinned checkpoint revisions used for the comparison:
 
@@ -135,6 +185,22 @@ Pinned checkpoint revisions used for the comparison:
 | `QWEN38_KV_CACHE_DTYPE` | `fp8_e4m3` | KV cache data type |
 | `QWEN38_DSPARK_BLOCK_SIZE` | `7` | DSpark proposal block size |
 | `QWEN38_AUTO_DOWNLOAD` | `1` | set to `0` to require preloaded weights |
+
+DenseSpark's primary deployment controls are:
+
+| Variable | Agent default | Interactive default | Purpose |
+|---|---:|---:|---|
+| `DENSESPARK_CONCURRENCY` | `16` | `1` | selects the measured MTP policy row |
+| `DENSESPARK_MAX_LEN` | `65536` | `131072` | maximum sequence length |
+| `DENSESPARK_MAX_NUM_SEQS` | `16` | vLLM default | admission cap |
+| `DENSESPARK_PORT` | `18083` | `18083` | loopback API port |
+| `DENSESPARK_GPU_UTIL` | `0.90` | `0.90` | vLLM GPU-memory utilization |
+| `DENSESPARK_KV_DTYPE` | auto/BF16 | auto/BF16 | KV-cache precision |
+| `DENSESPARK_SPEC_TOKENS` | policy (`3`) | policy (`8`) | explicit MTP-depth override |
+
+The vendored upstream README documents the lower-level experimental switches.
+Do not turn on prefix caching without also accepting its documented
+nondeterministic-output failure on this hybrid GDN model.
 
 The pinned image digest is the only one tested here. The launcher uses host
 networking and binds SGLang to `127.0.0.1`; put an authenticated proxy in front
